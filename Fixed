@@ -1,0 +1,134 @@
+#!/bin/bash
+# Full Auto-Setup Script for HP t150 (Non-Systemd Compatible, With Failover & Python Fix)
+
+set -e
+export DEBIAN_FRONTEND=noninteractive  # Prevent interactive prompts
+
+LOGFILE="setup_log.txt"
+echo "Starting full automated installation..." | tee -a $LOGFILE
+
+function try_install() {
+    PACKAGE=$1
+    echo "Installing $PACKAGE..." | tee -a $LOGFILE
+    if ! sudo apt-get install -y "$PACKAGE"; then
+        echo "Failed to install $PACKAGE, trying alternative..." | tee -a $LOGFILE
+        sudo apt-get update && sudo apt-get --fix-missing install -y "$PACKAGE" || echo "Could not install $PACKAGE, skipping!" | tee -a $LOGFILE
+    fi
+}
+
+#########################
+# 1. System Update & Essentials
+#########################
+echo "Updating system and installing essential tools..." | tee -a $LOGFILE
+sudo apt-get update && sudo apt-get upgrade -y
+try_install "curl"
+try_install "wget"
+try_install "git"
+try_install "software-properties-common"
+try_install "lsb-release"
+try_install "ca-certificates"
+try_install "apt-transport-https"
+try_install "build-essential"
+try_install "python3-venv"  # Needed for virtual environment
+
+#########################
+# 2. Install XFCE (Lightweight Desktop)
+#########################
+echo "Installing XFCE desktop environment..." | tee -a $LOGFILE
+try_install "xfce4"
+try_install "xfce4-goodies"
+try_install "lightdm"
+
+#########################
+# 3. Install Retro Gaming (RetroArch)
+#########################
+echo "Installing RetroArch..." | tee -a $LOGFILE
+try_install "retroarch"
+try_install "retroarch-assets"
+
+#########################
+# 4. Install Node.js & npm (For MagicMirror²)
+#########################
+echo "Installing Node.js and npm..." | tee -a $LOGFILE
+if ! command -v node >/dev/null 2>&1; then
+    curl -fsSL https://deb.nodesource.com/setup_16.x | sudo bash - || echo "Failed to setup Node.js repository, trying direct install..." | tee -a $LOGFILE
+    try_install "nodejs"
+    npm install -g npm@latest || echo "npm update failed, skipping..." | tee -a $LOGFILE
+else
+    echo "Node.js already installed!" | tee -a $LOGFILE
+fi
+
+#########################
+# 5. Install MagicMirror²
+#########################
+echo "Installing MagicMirror²..." | tee -a $LOGFILE
+rm -rf ~/MagicMirror
+if git clone https://github.com/MichMich/MagicMirror ~/MagicMirror; then
+    cd ~/MagicMirror
+    npm install --only=prod --force || echo "MagicMirror installation failed, retrying..." | tee -a $LOGFILE
+    cd ~
+else
+    echo "MagicMirror clone failed, skipping!" | tee -a $LOGFILE
+fi
+
+# Auto-start MagicMirror at boot
+(crontab -l ; echo "@reboot cd ~/MagicMirror && npm start") | crontab -
+
+#########################
+# 6. Install Music & Voice Control (MPD, Mycroft)
+#########################
+echo "Installing MPD and ncmpcpp..." | tee -a $LOGFILE
+try_install "mpd"
+try_install "ncmpcpp"
+
+echo "Installing Mycroft (voice assistant)..." | tee -a $LOGFILE
+# First try with system-wide installation
+if ! pip3 install --upgrade --force-reinstall mycroft-core --break-system-packages; then
+    echo "System-wide install failed. Using virtual environment..." | tee -a $LOGFILE
+    python3 -m venv ~/mycroft_env
+    source ~/mycroft_env/bin/activate
+    pip install --upgrade mycroft-core || echo "Mycroft installation failed, skipping..." | tee -a $LOGFILE
+fi
+
+# Restart Mycroft if installed
+if command -v mycroft-start >/dev/null 2>&1; then
+    mycroft-stop || true
+    mycroft-start debug &
+else
+    echo "Mycroft not found, skipping startup..." | tee -a $LOGFILE
+fi
+
+#########################
+# 7. Install Graphics Drivers & WiFi Support
+#########################
+echo "Installing graphics drivers and WiFi support..." | tee -a $LOGFILE
+try_install "mesa-utils"
+try_install "mesa-utils-extra"
+try_install "firmware-linux"
+try_install "network-manager"
+sudo service network-manager start || echo "Network Manager failed to start, skipping..." | tee -a $LOGFILE
+
+#########################
+# 8. Install SSH for Remote Access
+#########################
+echo "Installing SSH server..." | tee -a $LOGFILE
+try_install "openssh-server"
+sudo service ssh start || echo "SSH service failed to start, skipping..." | tee -a $LOGFILE
+sudo update-rc.d ssh enable
+
+#########################
+# 9. Install VNC for Remote Desktop
+#########################
+echo "Installing VNC server..." | tee -a $LOGFILE
+try_install "tightvncserver"
+vncserver :1 || echo "VNC startup failed, skipping..." | tee -a $LOGFILE
+
+# Auto-start VNC on boot
+echo "Setting up VNC to start on boot..." | tee -a $LOGFILE
+(crontab -l ; echo "@reboot vncserver :1") | crontab -
+
+#########################
+# 10. Final Reboot
+#########################
+echo "Installation complete! Rebooting now..." | tee -a $LOGFILE
+sudo reboot
