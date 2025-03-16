@@ -1,0 +1,109 @@
+#!/bin/bash
+# Full Auto-Setup Script for HP t150
+# Detects drive, overwrites old OS, installs new system, fixes bootloader.
+
+set -e
+export DEBIAN_FRONTEND=noninteractive  # Prevents interactive prompts
+
+LOGFILE="setup_log.txt"
+echo "Starting full automated installation..." | tee -a $LOGFILE
+
+function try_install() {
+    PACKAGE=$1
+    echo "Installing $PACKAGE..." | tee -a $LOGFILE
+    if ! sudo apt-get install -y "$PACKAGE"; then
+        echo "Failed to install $PACKAGE, trying alternative..." | tee -a $LOGFILE
+        sudo apt-get update && sudo apt-get --fix-missing install -y "$PACKAGE" || echo "Could not install $PACKAGE, skipping!" | tee -a $LOGFILE
+    fi
+}
+
+#########################
+# 1️⃣ Detect Main Drive and Wipe Old OS
+#########################
+echo "Detecting main drive..." | tee -a $LOGFILE
+MAIN_DRIVE=$(lsblk -dpno NAME,SIZE | grep -v "boot\|loop" | sort -k2 -rh | head -n1 | awk '{print $1}')
+echo "Main drive detected: $MAIN_DRIVE" | tee -a $LOGFILE
+
+echo "Wiping existing OS from $MAIN_DRIVE..." | tee -a $LOGFILE
+sudo umount ${MAIN_DRIVE}* || true
+sudo wipefs --all --force "$MAIN_DRIVE"
+sudo parted -s "$MAIN_DRIVE" mklabel gpt
+sudo parted -s "$MAIN_DRIVE" mkpart primary ext4 1MiB 100%
+sudo mkfs.ext4 -F "${MAIN_DRIVE}1"
+
+echo "Mounting new OS partition..." | tee -a $LOGFILE
+sudo mount "${MAIN_DRIVE}1" /mnt
+
+#########################
+# 2️⃣ Install OS Base System
+#########################
+echo "Installing base system..." | tee -a $LOGFILE
+try_install "debootstrap"
+sudo debootstrap --arch amd64 stable /mnt http://deb.debian.org/debian/
+
+echo "Configuring new OS environment..." | tee -a $LOGFILE
+sudo mount --bind /dev /mnt/dev
+sudo mount --bind /proc /mnt/proc
+sudo mount --bind /sys /mnt/sys
+
+#########################
+# 3️⃣ Install Core Packages
+#########################
+echo "Installing essential system packages..." | tee -a $LOGFILE
+try_install "linux-image-amd64"
+try_install "grub-pc"
+try_install "network-manager"
+try_install "sudo"
+try_install "xfce4"
+try_install "xfce4-goodies"
+try_install "lightdm"
+
+#########################
+# 4️⃣ Set Up Bootloader (GRUB)
+#########################
+echo "Installing and configuring GRUB bootloader..." | tee -a $LOGFILE
+sudo chroot /mnt grub-install "$MAIN_DRIVE"
+sudo chroot /mnt update-grub
+echo "Bootloader installation complete." | tee -a $LOGFILE
+
+#########################
+# 5️⃣ Install Software (RetroArch, MagicMirror, SSH, VNC)
+#########################
+echo "Installing additional software..." | tee -a $LOGFILE
+try_install "retroarch"
+try_install "retroarch-assets"
+try_install "nodejs"
+try_install "npm"
+
+echo "Setting up MagicMirror²..." | tee -a $LOGFILE
+rm -rf /mnt/home/MagicMirror
+git clone https://github.com/MichMich/MagicMirror /mnt/home/MagicMirror
+cd /mnt/home/MagicMirror
+npm install --only=prod --force
+cd ~
+
+echo "Setting up MagicMirror to start on boot..." | tee -a $LOGFILE
+echo "@reboot cd /home/MagicMirror && npm start" | sudo tee -a /mnt/etc/crontab
+
+echo "Installing SSH and VNC..." | tee -a $LOGFILE
+try_install "openssh-server"
+sudo chroot /mnt service ssh start
+sudo chroot /mnt update-rc.d ssh enable
+try_install "tightvncserver"
+echo "@reboot vncserver :1" | sudo tee -a /mnt/etc/crontab
+
+#########################
+# 6️⃣ Final Configuration
+#########################
+echo "Setting up root password..." | tee -a $LOGFILE
+echo "root:toor" | sudo chroot /mnt chpasswd
+
+echo "Enabling system services..." | tee -a $LOGFILE
+sudo chroot /mnt systemctl enable lightdm
+sudo chroot /mnt systemctl enable network-manager
+sudo chroot /mnt systemctl enable ssh
+sudo chroot /mnt systemctl enable vncserver
+
+echo "Unmounting and finishing installation..." | tee -a $LOGFILE
+sudo umount /mnt/dev /mnt/proc /mnt/sys /mnt
+sudo reboot
